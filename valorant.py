@@ -649,25 +649,27 @@ def main():
     hotkey_cooldown = 0.05  # 热键按住时的最小触发间隔，单位：秒
     last_hotkey_time = 0
 
-    display_interval = 0.1  # 展示窗口的刷新间隔，单位：秒
+    display_interval = frame_interval  # 展示窗口的刷新间隔，单位：秒
     last_display_time = 0
 
     fps_state = {'last_time': time.time(), 'count': 0}
     fps_update_interval = 1.0
 
-    while True:
-        loop_start = time.time()  # 循环开始计时
-
+    def record_capture_fps(capture_time):
         fps_state['count'] += 1
-        if loop_start - fps_state['last_time'] >= fps_update_interval:
-            elapsed_time = loop_start - fps_state['last_time']
+        if capture_time - fps_state['last_time'] >= fps_update_interval:
+            elapsed_time = capture_time - fps_state['last_time']
             current_fps = fps_state['count'] / elapsed_time if elapsed_time > 0 else 0
             if tk_window and hasattr(tk_window, 'fps_label'):
                 tk_window.fps_label.config(text=f"FPS: {current_fps:.1f}")
             fps_state['count'] = 0
-            fps_state['last_time'] = loop_start
+            fps_state['last_time'] = capture_time
+
+    while True:
+        loop_start = time.time()  # 循环开始计时
 
         frame_interval = 1.0 / max(target_fps_var.get(), 1)
+        display_interval = frame_interval
 
         current_scale = scale.get()
         current_capture_x = capture_x_var.get()
@@ -686,6 +688,7 @@ def main():
             if current_time - last_hotkey_time >= hotkey_cooldown:
                 last_hotkey_time = current_time
                 img = capture_screen(sct, capture_area)
+                record_capture_fps(current_time)
                 closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
                 if closest_enemy_head and len(closest_enemy_head) > 2:
                     perform_action(driver, *closest_enemy_head[:2], sleep_time_var.get(), size.get(), closest_enemy_head[2])
@@ -713,6 +716,7 @@ def main():
             if current_time - last_display_time >= display_interval:
                 if img is None:
                     img = capture_screen(sct, capture_area)
+                    record_capture_fps(current_time)
                 closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
                 display_image_with_detections(img, closest_enemy_head, closest_enemy, scale.get(), tk_window)
                 last_display_time = current_time
