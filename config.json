@@ -1,0 +1,11 @@
+{
+    "sleep_time": 0.01,
+    "click_time": 0.12,
+    "display": true,
+    "threshold": 0.1,
+    "scale": 1.0,
+    "size": 840.0,
+    "capture_x": 840,
+    "capture_y": 840,
+    "target_fps": 90
+}
