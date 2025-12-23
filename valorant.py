@@ -470,7 +470,7 @@ def damped_smooth_move(driver, relative_x, relative_y):
     """根据距离自适应阻尼并分步移动，兼顾大范围与精度。"""
     distance = math.hypot(relative_x, relative_y)
     if distance == 0:
-        return
+        return 0.0, 0.0
 
     # 距离越远阻尼越小，采用平方根衰减，近距离保持更高阻尼以防过冲
     normalized = min(distance / 500.0, 1.0)
@@ -486,6 +486,7 @@ def damped_smooth_move(driver, relative_x, relative_y):
         min_steps, max_steps, scale_factor = 6, 28, 6
 
     driver.smooth_move(move_x, move_y, min_steps=min_steps, max_steps=max_steps, scale_factor=scale_factor)
+    return move_x, move_y
 
 
 def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
@@ -504,9 +505,12 @@ def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
         time.sleep(sleep_time)
     else:
         if abs_x <= delta_size and abs_y <= delta_size:
-            damped_smooth_move(driver, relative_x, relative_y)
-            driver.click()
-            time.sleep(sleep_time)
+            move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
+            remaining_x = relative_x - move_x
+            remaining_y = relative_y - move_y
+            if abs(remaining_x) <= m_x and abs(remaining_y) <= m_y:
+                driver.click()
+                time.sleep(sleep_time)
 
 
 def perform_action_body(driver, relative_x, relative_y, sleep_time, size, body_xyxy):
@@ -521,9 +525,13 @@ def perform_action_body(driver, relative_x, relative_y, sleep_time, size, body_x
     delta_size = size * (xx / 50)
 
     if abs_x <= delta_size and abs_y <= delta_size:
-        damped_smooth_move(driver, relative_x, relative_y)
-        driver.click()
-        time.sleep(sleep_time)
+        move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
+        remaining_x = relative_x - move_x
+        remaining_y = relative_y - move_y
+        remaining_threshold = max(4.0, delta_size * 0.5)
+        if abs(remaining_x) <= remaining_threshold and abs(remaining_y) <= remaining_threshold:
+            driver.click()
+            time.sleep(sleep_time)
 
 
 def display_image_with_detections(img, closest_enemy_head, closest_enemy, scale, tk_window):
