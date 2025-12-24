@@ -522,18 +522,18 @@ def damped_smooth_move(driver, relative_x, relative_y):
     if distance == 0:
         return 0.0, 0.0
 
-    # 距离越远阻尼越小，采用平方根衰减，近距离保持更高阻尼以防过冲
+    # 距离越远阻尼越小，采用平方根衰减，近距离提高响应以增强跟随力度
     normalized = min(distance / 500.0, 1.0)
-    damping = 0.9 - 0.4 * math.sqrt(normalized)
+    damping = 0.95 - 0.3 * math.sqrt(normalized)
     move_x = relative_x * damping
     move_y = relative_y * damping
 
     if distance > 600:
-        min_steps, max_steps, scale_factor = 12, 40, 8
+        min_steps, max_steps, scale_factor = 10, 34, 8
     elif distance > 250:
-        min_steps, max_steps, scale_factor = 10, 34, 7
+        min_steps, max_steps, scale_factor = 8, 28, 7
     else:
-        min_steps, max_steps, scale_factor = 6, 28, 6
+        min_steps, max_steps, scale_factor = 5, 24, 6
 
     driver.smooth_move(move_x, move_y, min_steps=min_steps, max_steps=max_steps, scale_factor=scale_factor)
     return move_x, move_y
@@ -550,7 +550,7 @@ def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
     m_x = abs((x2 - x1) / 2)
     m_y = abs((y2 - y1) / 2)
 
-    if abs_x < m_x and abs_y < m_y:
+    if abs_x <= m_x * 1.15 and abs_y <= m_y * 1.15:
         driver.click()
         time.sleep(sleep_time)
     else:
@@ -558,7 +558,8 @@ def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
             move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
             remaining_x = relative_x - move_x
             remaining_y = relative_y - move_y
-            if abs(remaining_x) <= m_x and abs(remaining_y) <= m_y:
+            remaining_threshold = max(3.0, m_x * 1.2)
+            if abs(remaining_x) <= remaining_threshold and abs(remaining_y) <= remaining_threshold:
                 driver.click()
                 time.sleep(sleep_time)
 
@@ -578,7 +579,7 @@ def perform_action_body(driver, relative_x, relative_y, sleep_time, size, body_x
         move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
         remaining_x = relative_x - move_x
         remaining_y = relative_y - move_y
-        remaining_threshold = max(4.0, delta_size * 0.5)
+        remaining_threshold = max(6.0, delta_size * 0.7)
         if abs(remaining_x) <= remaining_threshold and abs(remaining_y) <= remaining_threshold:
             driver.click()
             time.sleep(sleep_time)
