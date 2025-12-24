@@ -235,11 +235,12 @@ class LGDriver:
             self.microsecond_sleep(2000)
 
 class ModelAdapter:
-    def __init__(self, model, names, device, backend):
+    def __init__(self, model, names, device, backend, use_half=False):
         self.model = model
         self.names = names
         self.device = device
         self.backend = backend
+        self.use_half = use_half
 
     def predict(self, img):
         if self.backend == "yolov5":
@@ -253,7 +254,7 @@ class ModelAdapter:
 
         with torch.inference_mode():
             device_arg = self.device.index if self.device.type == "cuda" else "cpu"
-            results = self.model.predict(source=img, imgsz=640, verbose=False, device=device_arg)
+            results = self.model.predict(source=img, imgsz=640, verbose=False, device=device_arg, half=self.use_half)
         if not results or results[0].boxes is None:
             return np.empty((0, 6), dtype=np.float32)
         boxes = results[0].boxes
@@ -289,7 +290,7 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
 
                     raw_model = YOLO(model_path)
                     raw_model.to(device)
-                    model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics")
+                    model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics", use_half=device.type == 'cuda')
                     with torch.inference_mode():
                         model.predict(np.zeros((640, 640, 3), dtype=np.uint8))
                 except Exception:
