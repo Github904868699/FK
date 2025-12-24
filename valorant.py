@@ -277,21 +277,29 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
         torch.backends.cudnn.conv.fp32_precision = 'tf32'
 
     model_filename = os.path.basename(model_path).lower()
-    use_ultralytics = "yolov11" in model_filename or "yolo11" in model_filename
+    prefer_ultralytics = "yolov11" in model_filename or "yolo11" in model_filename
+    ultralytics_available = importlib.util.find_spec("ultralytics") is not None
 
     for attempt in range(retries):
         try:
-            if use_ultralytics:
-                if importlib.util.find_spec("ultralytics") is None:
-                    raise RuntimeError("未安装 ultralytics，无法加载 YOLOv11 模型。")
-                from ultralytics import YOLO
+            model = None
+            if ultralytics_available:
+                try:
+                    from ultralytics import YOLO
 
-                raw_model = YOLO(model_path)
-                raw_model.to(device)
-                model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics")
-                with torch.inference_mode():
-                    model.predict(np.zeros((640, 640, 3), dtype=np.uint8))
-            else:
+                    raw_model = YOLO(model_path)
+                    raw_model.to(device)
+                    model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics")
+                    with torch.inference_mode():
+                        model.predict(np.zeros((640, 640, 3), dtype=np.uint8))
+                except Exception:
+                    if prefer_ultralytics:
+                        raise
+                    model = None
+
+            if model is None:
+                if prefer_ultralytics and not ultralytics_available:
+                    raise RuntimeError("未安装 ultralytics，无法加载 YOLOv11 模型。")
                 raw_model = torch.hub.load(repo_or_dir=repo_path,
                                            model='custom',
                                            path=model_path,
