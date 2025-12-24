@@ -483,16 +483,20 @@ def detect_enemy(model, img, capture_x, capture_y, confidence_threshold):
     enemy_results = []
 
     for *xyxy, conf, cls in detections:
-        if conf < confidence_threshold:
-            continue
         center_x = (xyxy[0] + xyxy[2]) / 2
         center_y = (xyxy[1] + xyxy[3]) / 2
         relative_x = center_x - capture_x // 2
         relative_y = center_y - capture_y // 2
         distance_to_center = np.sqrt(relative_x ** 2 + relative_y ** 2)
-        if model.names[int(cls)] == 'enemy_head':
+        try:
+            label = model.names[int(cls)]
+        except Exception:
+            label = None
+        if label == 'enemy_head':
             enemy_head_results.append((relative_x, relative_y + 4, xyxy, conf, distance_to_center))
-        elif model.names[int(cls)] == 'enemy':
+        elif label == 'enemy':
+            enemy_results.append((relative_x, relative_y, xyxy, conf, distance_to_center))
+        else:
             enemy_results.append((relative_x, relative_y, xyxy, conf, distance_to_center))
 
     closest_enemy_head = min(enemy_head_results, key=lambda x: x[4])[:4] if enemy_head_results else []
