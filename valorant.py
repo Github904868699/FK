@@ -1,5 +1,6 @@
 import math
 import os
+import importlib.util
 import sys
 import time
 import json
@@ -233,6 +234,35 @@ class LGDriver:
                 self.lg_driver.moveR(move_x, move_y, True)
             self.microsecond_sleep(2000)
 
+class ModelAdapter:
+    def __init__(self, model, names, device, backend):
+        self.model = model
+        self.names = names
+        self.device = device
+        self.backend = backend
+
+    def predict(self, img):
+        if self.backend == "yolov5":
+            with torch.inference_mode():
+                if self.device.type == 'cuda':
+                    with torch.amp.autocast(device_type='cuda'):
+                        results = self.model(img, size=640)
+                else:
+                    results = self.model(img, size=640)
+            return results.xyxy[0].cpu().numpy()
+
+        with torch.inference_mode():
+            device_arg = self.device.index if self.device.type == "cuda" else "cpu"
+            results = self.model.predict(source=img, imgsz=640, verbose=False, device=device_arg)
+        if not results or results[0].boxes is None:
+            return np.empty((0, 6), dtype=np.float32)
+        boxes = results[0].boxes
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls = boxes.cls.cpu().numpy()
+        return np.concatenate([xyxy, conf[:, None], cls[:, None]], axis=1)
+
+
 def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
@@ -246,20 +276,35 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
         torch.backends.cuda.matmul.fp32_precision = 'tf32'
         torch.backends.cudnn.conv.fp32_precision = 'tf32'
 
+    model_filename = os.path.basename(model_path).lower()
+    use_ultralytics = "yolov11" in model_filename or "yolo11" in model_filename
+
     for attempt in range(retries):
         try:
-            model = torch.hub.load(repo_or_dir=repo_path,
-                                   model='custom',
-                                   path=model_path,
-                                   source='local').to(device)
-            model.eval()
-            if device.type == 'cuda':
-                torch.backends.cudnn.benchmark = True
-                model.half()
+            if use_ultralytics:
+                if importlib.util.find_spec("ultralytics") is None:
+                    raise RuntimeError("未安装 ultralytics，无法加载 YOLOv11 模型。")
+                from ultralytics import YOLO
 
-            dummy_dtype = torch.float16 if device.type == 'cuda' else torch.float32
-            with torch.inference_mode():
-                model(torch.zeros(1, 3, 640, 640, device=device, dtype=dummy_dtype))
+                raw_model = YOLO(model_path)
+                raw_model.to(device)
+                model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics")
+                with torch.inference_mode():
+                    model.predict(np.zeros((640, 640, 3), dtype=np.uint8))
+            else:
+                raw_model = torch.hub.load(repo_or_dir=repo_path,
+                                           model='custom',
+                                           path=model_path,
+                                           source='local').to(device)
+                raw_model.eval()
+                if device.type == 'cuda':
+                    torch.backends.cudnn.benchmark = True
+                    raw_model.half()
+
+                dummy_dtype = torch.float16 if device.type == 'cuda' else torch.float32
+                with torch.inference_mode():
+                    raw_model(torch.zeros(1, 3, 640, 640, device=device, dtype=dummy_dtype))
+                model = ModelAdapter(raw_model, raw_model.names, device, "yolov5")
 
             driver = LGDriver(driver_path, click_time, jitter_enabled)
             return model, driver
@@ -423,16 +468,8 @@ def capture_screen(sct, capture_area):
 
 
 def detect_enemy(model, img, capture_x, capture_y, confidence_threshold):
-    device = next(model.parameters()).device
     img = np.ascontiguousarray(img)
-
-    with torch.inference_mode():
-        if device.type == 'cuda':
-            with torch.amp.autocast(device_type='cuda'):
-                results = model(img, size=640)
-        else:
-            results = model(img, size=640)
-    detections = results.xyxy[0].cpu().numpy()
+    detections = model.predict(img)
     enemy_head_results = []
     enemy_results = []
 
