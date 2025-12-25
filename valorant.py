@@ -491,9 +491,30 @@ def get_screen_center(monitor):
     return monitor.get('left', 0) + screen_width // 2, monitor.get('top', 0) + screen_height // 2
 
 
-def capture_screen(sct, capture_area):
-    screen_img = np.array(sct.grab(capture_area))
-    return cv2.cvtColor(screen_img, cv2.COLOR_BGRA2BGR)
+class CaptureBackend:
+    def __init__(self, sct):
+        self.sct = sct
+        self.dxcam = None
+        if importlib.util.find_spec("dxcam") is not None:
+            import dxcam
+
+            self.dxcam = dxcam.create(output_color="BGR")
+
+    def capture(self, capture_area):
+        if self.dxcam is not None:
+            left = capture_area["left"]
+            top = capture_area["top"]
+            right = left + capture_area["width"]
+            bottom = top + capture_area["height"]
+            frame = self.dxcam.grab(region=(left, top, right, bottom))
+            if frame is not None:
+                return frame
+        screen_img = np.array(self.sct.grab(capture_area))
+        return cv2.cvtColor(screen_img, cv2.COLOR_BGRA2BGR)
+
+
+def capture_screen(backend, capture_area):
+    return backend.capture(capture_area)
 
 
 def detect_enemy(model, img, capture_x, capture_y, confidence_threshold):
@@ -682,6 +703,7 @@ def main():
 
     enable_dpi_awareness()
     sct = mss()
+    capture_backend = CaptureBackend(sct)
     monitors = sct.monitors
     monitor_var = tk.StringVar(value="Display 1")
 
@@ -815,7 +837,7 @@ def main():
             if current_time - last_hotkey_time >= hotkey_cooldown:
                 last_hotkey_time = current_time
                 t_capture_start = time.perf_counter()
-                img = capture_screen(sct, capture_area)
+                img = capture_screen(capture_backend, capture_area)
                 capture_cost = time.perf_counter() - t_capture_start
                 record_capture_fps(current_time)
                 t_infer_start = time.perf_counter()
@@ -851,7 +873,7 @@ def main():
                 capture_cost = 0.0
                 if img is None:
                     t_capture_start = time.perf_counter()
-                    img = capture_screen(sct, capture_area)
+                    img = capture_screen(capture_backend, capture_area)
                     capture_cost = time.perf_counter() - t_capture_start
                     record_capture_fps(current_time)
                 t_infer_start = time.perf_counter()
