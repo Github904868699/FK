@@ -246,7 +246,7 @@ class ModelAdapter:
         self.use_half = use_half
 
     def predict(self, img):
-        if self.backend == "yolov5":
+        if self.backend in {"yolov5", "yolov5-pt", "tensorrt", "onnxruntime"}:
             with torch.inference_mode():
                 if self.device.type == 'cuda':
                     with torch.amp.autocast(device_type='cuda'):
@@ -306,7 +306,8 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
                     if os.path.exists(sidecar_pt):
                         name_model = attempt_load(sidecar_pt, device=torch.device("cpu"), inplace=True, fuse=False)
                         backend_model.names = name_model.module.names if hasattr(name_model, "module") else name_model.names
-                model = ModelAdapter(backend_model, backend_model.names, device, "yolov5")
+                inference_backend = "tensorrt" if model_ext == ".engine" else "onnxruntime"
+                model = ModelAdapter(backend_model, backend_model.names, device, inference_backend)
             elif ultralytics_available:
                 try:
                     from ultralytics import YOLO
@@ -336,7 +337,7 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
                 dummy_dtype = torch.float16 if device.type == 'cuda' else torch.float32
                 with torch.inference_mode():
                     raw_model(torch.zeros(1, 3, 640, 640, device=device, dtype=dummy_dtype))
-                model = ModelAdapter(raw_model, raw_model.names, device, "yolov5")
+                model = ModelAdapter(raw_model, raw_model.names, device, "yolov5-pt")
 
             driver = LGDriver(driver_path, click_time, jitter_enabled)
             return model, driver
@@ -498,10 +499,12 @@ class CaptureBackend:
     def __init__(self, sct, backend="dxgi"):
         self.sct = sct
         self.dxcam = None
+        self.backend = "mss"
         if backend == "dxgi" and importlib.util.find_spec("dxcam") is not None:
             import dxcam
 
             self.dxcam = dxcam.create(output_color="BGR")
+            self.backend = "dxgi"
 
     def capture(self, capture_area):
         if self.dxcam is not None:
@@ -805,7 +808,8 @@ def main():
             fps = count / elapsed if elapsed > 0 else 0
             print(
                 f"[性能] capture={capture_ms:.2f}ms | infer={infer_ms:.2f}ms | "
-                f"display={display_ms:.2f}ms | fps≈{fps:.1f}"
+                f"display={display_ms:.2f}ms | fps≈{fps:.1f} | "
+                f"capture_backend={capture_backend.backend} | infer_backend={model.backend}"
             )
             perf_state.update(
                 {
