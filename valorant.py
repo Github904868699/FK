@@ -497,27 +497,39 @@ def capture_screen(sct, capture_area):
 
 
 def detect_enemy(model, img, capture_x, capture_y, confidence_threshold):
+    target_size = 640
+    scale_x = capture_x / target_size
+    scale_y = capture_y / target_size
+    if img.shape[0] != target_size or img.shape[1] != target_size:
+        img = cv2.resize(img, (target_size, target_size))
     img = np.ascontiguousarray(img)
     detections = model.predict(img)
     enemy_head_results = []
     enemy_results = []
 
     for *xyxy, conf, cls in detections:
-        center_x = (xyxy[0] + xyxy[2]) / 2
-        center_y = (xyxy[1] + xyxy[3]) / 2
-        relative_x = center_x - capture_x // 2
-        relative_y = center_y - capture_y // 2
+        x1, y1, x2, y2 = xyxy
+        scaled_xyxy = (
+            x1 * scale_x,
+            y1 * scale_y,
+            x2 * scale_x,
+            y2 * scale_y,
+        )
+        center_x = (scaled_xyxy[0] + scaled_xyxy[2]) / 2
+        center_y = (scaled_xyxy[1] + scaled_xyxy[3]) / 2
+        relative_x = center_x - capture_x / 2
+        relative_y = center_y - capture_y / 2
         distance_to_center = np.sqrt(relative_x ** 2 + relative_y ** 2)
         try:
             label = model.names[int(cls)]
         except Exception:
             label = None
         if label == 'enemy_head':
-            enemy_head_results.append((relative_x, relative_y + 4, xyxy, conf, distance_to_center))
+            enemy_head_results.append((relative_x, relative_y + 4, scaled_xyxy, conf, distance_to_center))
         elif label == 'enemy':
-            enemy_results.append((relative_x, relative_y, xyxy, conf, distance_to_center))
+            enemy_results.append((relative_x, relative_y, scaled_xyxy, conf, distance_to_center))
         else:
-            enemy_results.append((relative_x, relative_y, xyxy, conf, distance_to_center))
+            enemy_results.append((relative_x, relative_y, scaled_xyxy, conf, distance_to_center))
 
     closest_enemy_head = min(enemy_head_results, key=lambda x: x[4])[:4] if enemy_head_results else []
     closest_enemy = min(enemy_results, key=lambda x: x[4])[:4] if enemy_results else []
