@@ -270,7 +270,7 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
     else:
         base_path = os.path.dirname(__file__)
     repo_path = os.path.join(base_path, './yolov5-master')
-    model_path = os.path.join(base_path, 'runs/train/exp3/weights/best.onnx')
+    model_path = os.path.join(base_path, 'runs/train/exp3/weights/best.engine')
     driver_path = os.path.join(base_path, 'driver/logitech.driver.dll')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
