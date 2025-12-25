@@ -39,6 +39,9 @@ DEFAULT_CONFIG = {
     "target_fps": 60
 }
 
+# 默认抓屏后端（"dxgi" 或 "mss"）
+CAPTURE_BACKEND = "dxgi"
+
 
 @contextlib.contextmanager
 def suppress_dll_output():
@@ -492,10 +495,10 @@ def get_screen_center(monitor):
 
 
 class CaptureBackend:
-    def __init__(self, sct):
+    def __init__(self, sct, backend="dxgi"):
         self.sct = sct
         self.dxcam = None
-        if importlib.util.find_spec("dxcam") is not None:
+        if backend == "dxgi" and importlib.util.find_spec("dxcam") is not None:
             import dxcam
 
             self.dxcam = dxcam.create(output_color="BGR")
@@ -703,7 +706,7 @@ def main():
 
     enable_dpi_awareness()
     sct = mss()
-    capture_backend = CaptureBackend(sct)
+    capture_backend = CaptureBackend(sct, backend=CAPTURE_BACKEND)
     monitors = sct.monitors
     monitor_var = tk.StringVar(value="Display 1")
 
