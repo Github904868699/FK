@@ -746,6 +746,15 @@ def main():
     fps_state = {'last_time': time.time(), 'count': 0}
     fps_update_interval = 1.0
 
+    perf_state = {
+        'last_time': time.perf_counter(),
+        'count': 0,
+        'capture': 0.0,
+        'infer': 0.0,
+        'display': 0.0,
+    }
+    perf_update_interval = 1.0
+
     def record_capture_fps(capture_time):
         fps_state['count'] += 1
         if capture_time - fps_state['last_time'] >= fps_update_interval:
@@ -755,6 +764,33 @@ def main():
                 tk_window.fps_label.config(text=f"FPS: {current_fps:.1f}")
             fps_state['count'] = 0
             fps_state['last_time'] = capture_time
+
+    def record_perf(duration_capture=0.0, duration_infer=0.0, duration_display=0.0):
+        perf_state['capture'] += duration_capture
+        perf_state['infer'] += duration_infer
+        perf_state['display'] += duration_display
+        perf_state['count'] += 1
+        now = time.perf_counter()
+        if now - perf_state['last_time'] >= perf_update_interval:
+            elapsed = now - perf_state['last_time']
+            count = max(perf_state['count'], 1)
+            capture_ms = perf_state['capture'] / count * 1000
+            infer_ms = perf_state['infer'] / count * 1000
+            display_ms = perf_state['display'] / count * 1000
+            fps = count / elapsed if elapsed > 0 else 0
+            print(
+                f"[性能] capture={capture_ms:.2f}ms | infer={infer_ms:.2f}ms | "
+                f"display={display_ms:.2f}ms | fps≈{fps:.1f}"
+            )
+            perf_state.update(
+                {
+                    'last_time': now,
+                    'count': 0,
+                    'capture': 0.0,
+                    'infer': 0.0,
+                    'display': 0.0,
+                }
+            )
 
     while True:
         loop_start = time.time()  # 循环开始计时
@@ -778,9 +814,16 @@ def main():
         if win32api.GetAsyncKeyState(VK_RBUTTON) < 0:
             if current_time - last_hotkey_time >= hotkey_cooldown:
                 last_hotkey_time = current_time
+                t_capture_start = time.perf_counter()
                 img = capture_screen(sct, capture_area)
+                capture_cost = time.perf_counter() - t_capture_start
                 record_capture_fps(current_time)
-                closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
+                t_infer_start = time.perf_counter()
+                closest_enemy_head, closest_enemy = detect_enemy(
+                    model, img, current_capture_x, current_capture_y, threshold.get()
+                )
+                infer_cost = time.perf_counter() - t_infer_start
+                record_perf(duration_capture=capture_cost, duration_infer=infer_cost)
                 if closest_enemy_head and len(closest_enemy_head) > 2:
                     perform_action(driver, *closest_enemy_head[:2], sleep_time_var.get(), size.get(), closest_enemy_head[2])
                     continue
@@ -805,11 +848,21 @@ def main():
 
         if display_var.get():
             if current_time - last_display_time >= display_interval:
+                capture_cost = 0.0
                 if img is None:
+                    t_capture_start = time.perf_counter()
                     img = capture_screen(sct, capture_area)
+                    capture_cost = time.perf_counter() - t_capture_start
                     record_capture_fps(current_time)
-                closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
+                t_infer_start = time.perf_counter()
+                closest_enemy_head, closest_enemy = detect_enemy(
+                    model, img, current_capture_x, current_capture_y, threshold.get()
+                )
+                infer_cost = time.perf_counter() - t_infer_start
+                t_display_start = time.perf_counter()
                 display_image_with_detections(img, closest_enemy_head, closest_enemy, scale.get(), tk_window)
+                display_cost = time.perf_counter() - t_display_start
+                record_perf(duration_capture=capture_cost, duration_infer=infer_cost, duration_display=display_cost)
                 last_display_time = current_time
 
         if (win32api.GetAsyncKeyState(win32con.VK_SHIFT) < 0 and
