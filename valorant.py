@@ -278,13 +278,33 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
         torch.backends.cudnn.conv.fp32_precision = 'tf32'
 
     model_filename = os.path.basename(model_path).lower()
+    model_ext = os.path.splitext(model_filename)[1]
     prefer_ultralytics = "yolov11" in model_filename or "yolo11" in model_filename
     ultralytics_available = importlib.util.find_spec("ultralytics") is not None
+    use_backend_engine = model_ext in {".engine", ".onnx"}
 
     for attempt in range(retries):
         try:
             model = None
-            if ultralytics_available:
+            if use_backend_engine:
+                if repo_path not in sys.path:
+                    sys.path.append(repo_path)
+                from models.common import DetectMultiBackend, AutoShape
+                from models.experimental import attempt_load
+
+                backend = DetectMultiBackend(model_path, device=device, fp16=device.type == 'cuda')
+                backend_model = AutoShape(backend, verbose=False)
+                if backend_model.names and isinstance(backend_model.names, dict):
+                    first_name = backend_model.names.get(0, "")
+                else:
+                    first_name = ""
+                if not first_name or first_name.startswith("class"):
+                    sidecar_pt = os.path.splitext(model_path)[0] + ".pt"
+                    if os.path.exists(sidecar_pt):
+                        name_model = attempt_load(sidecar_pt, device=torch.device("cpu"), inplace=True, fuse=False)
+                        backend_model.names = name_model.module.names if hasattr(name_model, "module") else name_model.names
+                model = ModelAdapter(backend_model, backend_model.names, device, "yolov5")
+            elif ultralytics_available:
                 try:
                     from ultralytics import YOLO
 
