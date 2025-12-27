@@ -730,7 +730,22 @@ def main():
         height = int(capture_y_var.get() * scale.get())
         tk_window.geometry(f"{width}x{height}+0+0")
 
-    def update_capture_area():
+    model = None
+    driver = None
+    capture_ready = False
+
+    def start_detection_if_needed():
+        nonlocal model, driver, capture_ready
+        if capture_ready:
+            return
+        model, driver = initialize_model_and_driver(click_time, jitter_enabled)
+        capture_ready = model is not None and driver is not None
+        if capture_ready:
+            print("已选择显示器，开始加载模型并抓屏。")
+        else:
+            print("模型或驱动加载失败，未开始抓屏。")
+
+    def update_capture_area(from_user=False):
         monitor_label = monitor_var.get()
         try:
             monitor_index = int(''.join(filter(str.isdigit, monitor_label)))
@@ -754,20 +769,23 @@ def main():
         capture_area.update({'top': top, 'left': left, 'width': width, 'height': height})
         clamp_size_to_roi()
         update_display_geometry()
+        if from_user:
+            start_detection_if_needed()
 
     tk_window = create_tk_window(root, scale, capture_x_var, capture_y_var)
     control_panel_visible = True
+    def on_monitor_change(_=None):
+        update_capture_area(from_user=True)
+
     create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
-                        monitor_var, monitor_options, monitor_count_var, update_capture_area, jitter_enabled,
+                        monitor_var, monitor_options, monitor_count_var, on_monitor_change, jitter_enabled,
                         capture_x_var, capture_y_var, target_fps_var)
 
-    capture_x_var.trace_add("write", lambda *_: update_capture_area())
-    capture_y_var.trace_add("write", lambda *_: update_capture_area())
+    capture_x_var.trace_add("write", lambda *_: update_capture_area(from_user=False))
+    capture_y_var.trace_add("write", lambda *_: update_capture_area(from_user=False))
     scale.trace_add("write", lambda *_: update_display_geometry())
 
-    update_capture_area()
-
-    model, driver = initialize_model_and_driver(click_time, jitter_enabled)
+    update_capture_area(from_user=False)
 
     previous_scale = scale.get()
     previous_capture_x = capture_x_var.get()
@@ -817,10 +835,11 @@ def main():
             infer_ms = perf_state['infer'] / count * 1000
             display_ms = perf_state['display'] / count * 1000
             fps = count / elapsed if elapsed > 0 else 0
+            infer_backend = model.backend if model is not None else "none"
             print(
                 f"[性能] capture={capture_ms:.2f}ms | infer={infer_ms:.2f}ms | "
                 f"display={display_ms:.2f}ms | fps≈{fps:.1f} | "
-                f"capture_backend={capture_backend.backend} | infer_backend={model.backend}"
+                f"capture_backend={capture_backend.backend} | infer_backend={infer_backend}"
             )
             perf_state.update(
                 {
@@ -850,6 +869,12 @@ def main():
 
         current_time = time.time()
         img = None
+
+        if not capture_ready:
+            root.update_idletasks()
+            root.update()
+            time.sleep(0.05)
+            continue
 
         if win32api.GetAsyncKeyState(VK_RBUTTON) < 0:
             if current_time - last_hotkey_time >= hotkey_cooldown:
