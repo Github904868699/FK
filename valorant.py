@@ -736,9 +736,17 @@ def main():
             monitor_var.set(f"Display {monitor_index}")
         monitor = monitors[monitor_index]
         screen_center_x, screen_center_y = get_screen_center(monitor)
-        left = screen_center_x - capture_x_var.get() // 2
-        top = screen_center_y - capture_y_var.get() // 2
-        capture_area.update({'top': top, 'left': left, 'width': capture_x_var.get(), 'height': capture_y_var.get()})
+        width = capture_x_var.get()
+        height = capture_y_var.get()
+        left = screen_center_x - width // 2
+        top = screen_center_y - height // 2
+        monitor_left = monitor.get('left', 0)
+        monitor_top = monitor.get('top', 0)
+        monitor_right = monitor_left + monitor['width']
+        monitor_bottom = monitor_top + monitor['height']
+        left = max(monitor_left, min(left, monitor_right - width))
+        top = max(monitor_top, min(top, monitor_bottom - height))
+        capture_area.update({'top': top, 'left': left, 'width': width, 'height': height})
         clamp_size_to_roi()
         update_display_geometry()
 
