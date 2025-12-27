@@ -352,9 +352,9 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
 
 
 def create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
-                        monitor_var, monitor_options, on_monitor_change, jitter_enabled, capture_x_var,
-                        capture_y_var, target_fps_var):
-    panel_width, panel_height = 340, 420
+                        monitor_var, monitor_options, monitor_count_var, on_monitor_change, jitter_enabled,
+                        capture_x_var, capture_y_var, target_fps_var):
+    panel_width, panel_height = 340, 450
     root.geometry(f"{panel_width}x{panel_height}+10+25")
     root.minsize(panel_width, panel_height)
     root.overrideredirect(True)
@@ -454,6 +454,9 @@ def create_control_panel(root, sleep_time_var, click_time, display_var, threshol
                                      bg="black", fg="white", selectcolor="gray20", activebackground="black",
                                      activeforeground="white")
     jitter_checkbox.grid(row=8, column=3, padx=5, pady=5)
+
+    monitor_count_label = tk.Label(frame, textvariable=monitor_count_var, fg="white", bg="black", font=("Arial", 10))
+    monitor_count_label.grid(row=9, column=0, columnspan=4, padx=5, pady=(0, 8), sticky="ew")
 
 
 def create_tk_window(root, scale, capture_x_var, capture_y_var):
@@ -711,7 +714,9 @@ def main():
     sct = mss()
     capture_backend = CaptureBackend(sct, backend=CAPTURE_BACKEND)
     monitors = sct.monitors
-    monitor_var = tk.StringVar(value="Display 1")
+    monitor_options = [f"Display {i}" for i in range(1, len(monitors))] if len(monitors) > 1 else ["Display 1"]
+    monitor_var = tk.StringVar(value=monitor_options[0])
+    monitor_count_var = tk.StringVar(value=f"Monitors: {max(len(monitors) - 1, 1)}")
 
     capture_area = {'top': 0, 'left': 0, 'width': capture_x_var.get(), 'height': capture_y_var.get()}
 
@@ -750,13 +755,11 @@ def main():
         clamp_size_to_roi()
         update_display_geometry()
 
-    monitor_options = [f"Display {i}" for i in range(1, len(monitors))] if len(monitors) > 1 else ["Display 1"]
-
     tk_window = create_tk_window(root, scale, capture_x_var, capture_y_var)
     control_panel_visible = True
     create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
-                        monitor_var, monitor_options, update_capture_area, jitter_enabled, capture_x_var,
-                        capture_y_var, target_fps_var)
+                        monitor_var, monitor_options, monitor_count_var, update_capture_area, jitter_enabled,
+                        capture_x_var, capture_y_var, target_fps_var)
 
     capture_x_var.trace_add("write", lambda *_: update_capture_area())
     capture_y_var.trace_add("write", lambda *_: update_capture_area())
