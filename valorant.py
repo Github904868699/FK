@@ -1,5 +1,6 @@
 import math
 import os
+import importlib.util
 import sys
 import time
 import json
@@ -37,6 +38,9 @@ DEFAULT_CONFIG = {
     "capture_y": 640,
     "target_fps": 60
 }
+
+# 默认抓屏后端（"dxgi" 或 "mss"）
+CAPTURE_BACKEND = "dxgi"
 
 
 @contextlib.contextmanager
@@ -233,33 +237,107 @@ class LGDriver:
                 self.lg_driver.moveR(move_x, move_y, True)
             self.microsecond_sleep(2000)
 
+class ModelAdapter:
+    def __init__(self, model, names, device, backend, use_half=False):
+        self.model = model
+        self.names = names
+        self.device = device
+        self.backend = backend
+        self.use_half = use_half
+
+    def predict(self, img):
+        if self.backend in {"yolov5", "yolov5-pt", "tensorrt", "onnxruntime"}:
+            with torch.inference_mode():
+                if self.device.type == 'cuda':
+                    with torch.amp.autocast(device_type='cuda'):
+                        results = self.model(img, size=640)
+                else:
+                    results = self.model(img, size=640)
+            return results.xyxy[0].cpu().numpy()
+
+        with torch.inference_mode():
+            device_arg = self.device.index if self.device.type == "cuda" else "cpu"
+            results = self.model.predict(source=img, imgsz=640, verbose=False, device=device_arg, half=self.use_half)
+        if not results or results[0].boxes is None:
+            return np.empty((0, 6), dtype=np.float32)
+        boxes = results[0].boxes
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        cls = boxes.cls.cpu().numpy()
+        return np.concatenate([xyxy, conf[:, None], cls[:, None]], axis=1)
+
+
 def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
     else:
         base_path = os.path.dirname(__file__)
     repo_path = os.path.join(base_path, './yolov5-master')
-    model_path = os.path.join(base_path, 'runs/train/exp3/weights/best.pt')
+    model_path = os.path.join(base_path, 'runs/train/exp3/weights/best.engine')
     driver_path = os.path.join(base_path, 'driver/logitech.driver.dll')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == 'cuda':
         torch.backends.cuda.matmul.fp32_precision = 'tf32'
         torch.backends.cudnn.conv.fp32_precision = 'tf32'
 
+    model_filename = os.path.basename(model_path).lower()
+    model_ext = os.path.splitext(model_filename)[1]
+    prefer_ultralytics = "yolov11" in model_filename or "yolo11" in model_filename
+    ultralytics_available = importlib.util.find_spec("ultralytics") is not None
+    use_backend_engine = model_ext in {".engine", ".onnx"}
+
     for attempt in range(retries):
         try:
-            model = torch.hub.load(repo_or_dir=repo_path,
-                                   model='custom',
-                                   path=model_path,
-                                   source='local').to(device)
-            model.eval()
-            if device.type == 'cuda':
-                torch.backends.cudnn.benchmark = True
-                model.half()
+            model = None
+            if use_backend_engine:
+                if repo_path not in sys.path:
+                    sys.path.append(repo_path)
+                from models.common import DetectMultiBackend, AutoShape
+                from models.experimental import attempt_load
 
-            dummy_dtype = torch.float16 if device.type == 'cuda' else torch.float32
-            with torch.inference_mode():
-                model(torch.zeros(1, 3, 640, 640, device=device, dtype=dummy_dtype))
+                backend = DetectMultiBackend(model_path, device=device, fp16=device.type == 'cuda')
+                backend_model = AutoShape(backend, verbose=False)
+                if backend_model.names and isinstance(backend_model.names, dict):
+                    first_name = backend_model.names.get(0, "")
+                else:
+                    first_name = ""
+                if not first_name or first_name.startswith("class"):
+                    sidecar_pt = os.path.splitext(model_path)[0] + ".pt"
+                    if os.path.exists(sidecar_pt):
+                        name_model = attempt_load(sidecar_pt, device=torch.device("cpu"), inplace=True, fuse=False)
+                        backend_model.names = name_model.module.names if hasattr(name_model, "module") else name_model.names
+                inference_backend = "tensorrt" if model_ext == ".engine" else "onnxruntime"
+                model = ModelAdapter(backend_model, backend_model.names, device, inference_backend)
+            elif ultralytics_available:
+                try:
+                    from ultralytics import YOLO
+
+                    raw_model = YOLO(model_path)
+                    raw_model.to(device)
+                    model = ModelAdapter(raw_model, raw_model.names, device, "ultralytics", use_half=device.type == 'cuda')
+                    with torch.inference_mode():
+                        model.predict(np.zeros((640, 640, 3), dtype=np.uint8))
+                except Exception:
+                    if prefer_ultralytics:
+                        raise
+                    model = None
+
+            if model is None:
+                if prefer_ultralytics and not ultralytics_available:
+                    raise RuntimeError("未安装 ultralytics，无法加载 YOLOv11 模型。")
+                raw_model = torch.hub.load(repo_or_dir=repo_path,
+                                           model='custom',
+                                           path=model_path,
+                                           source='local').to(device)
+                raw_model.eval()
+                if device.type == 'cuda':
+                    torch.backends.cudnn.benchmark = True
+                    raw_model.half()
+
+                dummy_dtype = torch.float16 if device.type == 'cuda' else torch.float32
+                with torch.inference_mode():
+                    raw_model(torch.zeros(1, 3, 640, 640, device=device, dtype=dummy_dtype))
+                model = ModelAdapter(raw_model, raw_model.names, device, "yolov5-pt")
 
             driver = LGDriver(driver_path, click_time, jitter_enabled)
             return model, driver
@@ -274,9 +352,9 @@ def initialize_model_and_driver(click_time, jitter_enabled, retries=3, delay=5):
 
 
 def create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
-                        monitor_var, monitor_options, on_monitor_change, jitter_enabled, capture_x_var,
-                        capture_y_var, target_fps_var):
-    panel_width, panel_height = 340, 420
+                        monitor_var, monitor_options, monitor_count_var, on_monitor_change, jitter_enabled,
+                        capture_x_var, capture_y_var, target_fps_var):
+    panel_width, panel_height = 340, 450
     root.geometry(f"{panel_width}x{panel_height}+10+25")
     root.minsize(panel_width, panel_height)
     root.overrideredirect(True)
@@ -377,6 +455,9 @@ def create_control_panel(root, sleep_time_var, click_time, display_var, threshol
                                      activeforeground="white")
     jitter_checkbox.grid(row=8, column=3, padx=5, pady=5)
 
+    monitor_count_label = tk.Label(frame, textvariable=monitor_count_var, fg="white", bg="black", font=("Arial", 10))
+    monitor_count_label.grid(row=9, column=0, columnspan=4, padx=5, pady=(0, 8), sticky="ew")
+
 
 def create_tk_window(root, scale, capture_x_var, capture_y_var):
     width = int(capture_x_var.get() * scale.get())
@@ -417,37 +498,68 @@ def get_screen_center(monitor):
     return monitor.get('left', 0) + screen_width // 2, monitor.get('top', 0) + screen_height // 2
 
 
-def capture_screen(sct, capture_area):
-    screen_img = np.array(sct.grab(capture_area))
-    return cv2.cvtColor(screen_img, cv2.COLOR_BGRA2BGR)
+class CaptureBackend:
+    def __init__(self, sct, backend="dxgi"):
+        self.sct = sct
+        self.dxcam = None
+        self.backend = "mss"
+        if backend == "dxgi" and importlib.util.find_spec("dxcam") is not None:
+            import dxcam
+
+            self.dxcam = dxcam.create(output_color="BGR")
+            self.backend = "dxgi"
+
+    def capture(self, capture_area):
+        if self.dxcam is not None:
+            left = capture_area["left"]
+            top = capture_area["top"]
+            right = left + capture_area["width"]
+            bottom = top + capture_area["height"]
+            frame = self.dxcam.grab(region=(left, top, right, bottom))
+            if frame is not None:
+                return frame
+        screen_img = np.array(self.sct.grab(capture_area))
+        return cv2.cvtColor(screen_img, cv2.COLOR_BGRA2BGR)
+
+
+def capture_screen(backend, capture_area):
+    return backend.capture(capture_area)
 
 
 def detect_enemy(model, img, capture_x, capture_y, confidence_threshold):
-    device = next(model.parameters()).device
+    target_size = 640
+    scale_x = capture_x / target_size
+    scale_y = capture_y / target_size
+    if img.shape[0] != target_size or img.shape[1] != target_size:
+        img = cv2.resize(img, (target_size, target_size))
     img = np.ascontiguousarray(img)
-
-    with torch.inference_mode():
-        if device.type == 'cuda':
-            with torch.amp.autocast(device_type='cuda'):
-                results = model(img, size=640)
-        else:
-            results = model(img, size=640)
-    detections = results.xyxy[0].cpu().numpy()
+    detections = model.predict(img)
     enemy_head_results = []
     enemy_results = []
 
     for *xyxy, conf, cls in detections:
-        if conf < confidence_threshold:
-            continue
-        center_x = (xyxy[0] + xyxy[2]) / 2
-        center_y = (xyxy[1] + xyxy[3]) / 2
-        relative_x = center_x - capture_x // 2
-        relative_y = center_y - capture_y // 2
+        x1, y1, x2, y2 = xyxy
+        scaled_xyxy = (
+            x1 * scale_x,
+            y1 * scale_y,
+            x2 * scale_x,
+            y2 * scale_y,
+        )
+        center_x = (scaled_xyxy[0] + scaled_xyxy[2]) / 2
+        center_y = (scaled_xyxy[1] + scaled_xyxy[3]) / 2
+        relative_x = center_x - capture_x / 2
+        relative_y = center_y - capture_y / 2
         distance_to_center = np.sqrt(relative_x ** 2 + relative_y ** 2)
-        if model.names[int(cls)] == 'enemy_head':
-            enemy_head_results.append((relative_x, relative_y + 4, xyxy, conf, distance_to_center))
-        elif model.names[int(cls)] == 'enemy':
-            enemy_results.append((relative_x, relative_y, xyxy, conf, distance_to_center))
+        try:
+            label = model.names[int(cls)]
+        except Exception:
+            label = None
+        if label == 'enemy_head':
+            enemy_head_results.append((relative_x, relative_y + 4, scaled_xyxy, conf, distance_to_center))
+        elif label == 'enemy':
+            enemy_results.append((relative_x, relative_y, scaled_xyxy, conf, distance_to_center))
+        else:
+            enemy_results.append((relative_x, relative_y, scaled_xyxy, conf, distance_to_center))
 
     closest_enemy_head = min(enemy_head_results, key=lambda x: x[4])[:4] if enemy_head_results else []
     closest_enemy = min(enemy_results, key=lambda x: x[4])[:4] if enemy_results else []
@@ -470,22 +582,23 @@ def damped_smooth_move(driver, relative_x, relative_y):
     """根据距离自适应阻尼并分步移动，兼顾大范围与精度。"""
     distance = math.hypot(relative_x, relative_y)
     if distance == 0:
-        return
+        return 0.0, 0.0
 
-    # 距离越远阻尼越小，采用平方根衰减，近距离保持更高阻尼以防过冲
+    # 距离越远阻尼越小，采用平方根衰减，近距离提高响应以增强跟随力度
     normalized = min(distance / 500.0, 1.0)
-    damping = 0.9 - 0.4 * math.sqrt(normalized)
+    damping = 0.95 - 0.3 * math.sqrt(normalized)
     move_x = relative_x * damping
     move_y = relative_y * damping
 
     if distance > 600:
-        min_steps, max_steps, scale_factor = 12, 40, 8
+        min_steps, max_steps, scale_factor = 10, 34, 8
     elif distance > 250:
-        min_steps, max_steps, scale_factor = 10, 34, 7
+        min_steps, max_steps, scale_factor = 8, 28, 7
     else:
-        min_steps, max_steps, scale_factor = 6, 28, 6
+        min_steps, max_steps, scale_factor = 5, 24, 6
 
     driver.smooth_move(move_x, move_y, min_steps=min_steps, max_steps=max_steps, scale_factor=scale_factor)
+    return move_x, move_y
 
 
 def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
@@ -499,14 +612,18 @@ def perform_action(driver, relative_x, relative_y, sleep_time, size, head_xyxy):
     m_x = abs((x2 - x1) / 2)
     m_y = abs((y2 - y1) / 2)
 
-    if abs_x < m_x and abs_y < m_y:
+    if abs_x <= m_x * 1.15 and abs_y <= m_y * 1.15:
         driver.click()
         time.sleep(sleep_time)
     else:
         if abs_x <= delta_size and abs_y <= delta_size:
-            damped_smooth_move(driver, relative_x, relative_y)
-            driver.click()
-            time.sleep(sleep_time)
+            move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
+            remaining_x = relative_x - move_x
+            remaining_y = relative_y - move_y
+            remaining_threshold = max(3.0, m_x * 1.2)
+            if abs(remaining_x) <= remaining_threshold and abs(remaining_y) <= remaining_threshold:
+                driver.click()
+                time.sleep(sleep_time)
 
 
 def perform_action_body(driver, relative_x, relative_y, sleep_time, size, body_xyxy):
@@ -521,9 +638,13 @@ def perform_action_body(driver, relative_x, relative_y, sleep_time, size, body_x
     delta_size = size * (xx / 50)
 
     if abs_x <= delta_size and abs_y <= delta_size:
-        damped_smooth_move(driver, relative_x, relative_y)
-        driver.click()
-        time.sleep(sleep_time)
+        move_x, move_y = damped_smooth_move(driver, relative_x, relative_y)
+        remaining_x = relative_x - move_x
+        remaining_y = relative_y - move_y
+        remaining_threshold = max(6.0, delta_size * 0.7)
+        if abs(remaining_x) <= remaining_threshold and abs(remaining_y) <= remaining_threshold:
+            driver.click()
+            time.sleep(sleep_time)
 
 
 def display_image_with_detections(img, closest_enemy_head, closest_enemy, scale, tk_window):
@@ -591,8 +712,11 @@ def main():
 
     enable_dpi_awareness()
     sct = mss()
+    capture_backend = CaptureBackend(sct, backend=CAPTURE_BACKEND)
     monitors = sct.monitors
-    monitor_var = tk.StringVar(value="Display 1")
+    monitor_options = [f"Display {i}" for i in range(1, len(monitors))] if len(monitors) > 1 else ["Display 1"]
+    monitor_var = tk.StringVar(value=monitor_options[0])
+    monitor_count_var = tk.StringVar(value=f"Monitors: {max(len(monitors) - 1, 1)}")
 
     capture_area = {'top': 0, 'left': 0, 'width': capture_x_var.get(), 'height': capture_y_var.get()}
 
@@ -606,7 +730,22 @@ def main():
         height = int(capture_y_var.get() * scale.get())
         tk_window.geometry(f"{width}x{height}+0+0")
 
-    def update_capture_area():
+    model = None
+    driver = None
+    capture_ready = False
+
+    def start_detection_if_needed():
+        nonlocal model, driver, capture_ready
+        if capture_ready:
+            return
+        model, driver = initialize_model_and_driver(click_time, jitter_enabled)
+        capture_ready = model is not None and driver is not None
+        if capture_ready:
+            print("已选择显示器，开始加载模型并抓屏。")
+        else:
+            print("模型或驱动加载失败，未开始抓屏。")
+
+    def update_capture_area(from_user=False):
         monitor_label = monitor_var.get()
         try:
             monitor_index = int(''.join(filter(str.isdigit, monitor_label)))
@@ -617,27 +756,36 @@ def main():
             monitor_var.set(f"Display {monitor_index}")
         monitor = monitors[monitor_index]
         screen_center_x, screen_center_y = get_screen_center(monitor)
-        left = screen_center_x - capture_x_var.get() // 2
-        top = screen_center_y - capture_y_var.get() // 2
-        capture_area.update({'top': top, 'left': left, 'width': capture_x_var.get(), 'height': capture_y_var.get()})
+        width = capture_x_var.get()
+        height = capture_y_var.get()
+        left = screen_center_x - width // 2
+        top = screen_center_y - height // 2
+        monitor_left = monitor.get('left', 0)
+        monitor_top = monitor.get('top', 0)
+        monitor_right = monitor_left + monitor['width']
+        monitor_bottom = monitor_top + monitor['height']
+        left = max(monitor_left, min(left, monitor_right - width))
+        top = max(monitor_top, min(top, monitor_bottom - height))
+        capture_area.update({'top': top, 'left': left, 'width': width, 'height': height})
         clamp_size_to_roi()
         update_display_geometry()
-
-    monitor_options = [f"Display {i}" for i in range(1, len(monitors))] if len(monitors) > 1 else ["Display 1"]
+        if from_user:
+            start_detection_if_needed()
 
     tk_window = create_tk_window(root, scale, capture_x_var, capture_y_var)
     control_panel_visible = True
-    create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
-                        monitor_var, monitor_options, update_capture_area, jitter_enabled, capture_x_var,
-                        capture_y_var, target_fps_var)
+    def on_monitor_change(_=None):
+        update_capture_area(from_user=True)
 
-    capture_x_var.trace_add("write", lambda *_: update_capture_area())
-    capture_y_var.trace_add("write", lambda *_: update_capture_area())
+    create_control_panel(root, sleep_time_var, click_time, display_var, threshold, scale, size, tk_window,
+                        monitor_var, monitor_options, monitor_count_var, on_monitor_change, jitter_enabled,
+                        capture_x_var, capture_y_var, target_fps_var)
+
+    capture_x_var.trace_add("write", lambda *_: update_capture_area(from_user=False))
+    capture_y_var.trace_add("write", lambda *_: update_capture_area(from_user=False))
     scale.trace_add("write", lambda *_: update_display_geometry())
 
-    update_capture_area()
-
-    model, driver = initialize_model_and_driver(click_time, jitter_enabled)
+    update_capture_area(from_user=False)
 
     previous_scale = scale.get()
     previous_capture_x = capture_x_var.get()
@@ -649,25 +797,65 @@ def main():
     hotkey_cooldown = 0.05  # 热键按住时的最小触发间隔，单位：秒
     last_hotkey_time = 0
 
-    display_interval = 0.1  # 展示窗口的刷新间隔，单位：秒
+    display_interval = frame_interval  # 展示窗口的刷新间隔，单位：秒
     last_display_time = 0
 
     fps_state = {'last_time': time.time(), 'count': 0}
     fps_update_interval = 1.0
 
-    while True:
-        loop_start = time.time()  # 循环开始计时
+    perf_state = {
+        'last_time': time.perf_counter(),
+        'count': 0,
+        'capture': 0.0,
+        'infer': 0.0,
+        'display': 0.0,
+    }
+    perf_update_interval = 1.0
 
+    def record_capture_fps(capture_time):
         fps_state['count'] += 1
-        if loop_start - fps_state['last_time'] >= fps_update_interval:
-            elapsed_time = loop_start - fps_state['last_time']
+        if capture_time - fps_state['last_time'] >= fps_update_interval:
+            elapsed_time = capture_time - fps_state['last_time']
             current_fps = fps_state['count'] / elapsed_time if elapsed_time > 0 else 0
             if tk_window and hasattr(tk_window, 'fps_label'):
                 tk_window.fps_label.config(text=f"FPS: {current_fps:.1f}")
             fps_state['count'] = 0
-            fps_state['last_time'] = loop_start
+            fps_state['last_time'] = capture_time
+
+    def record_perf(duration_capture=0.0, duration_infer=0.0, duration_display=0.0):
+        perf_state['capture'] += duration_capture
+        perf_state['infer'] += duration_infer
+        perf_state['display'] += duration_display
+        perf_state['count'] += 1
+        now = time.perf_counter()
+        if now - perf_state['last_time'] >= perf_update_interval:
+            elapsed = now - perf_state['last_time']
+            count = max(perf_state['count'], 1)
+            capture_ms = perf_state['capture'] / count * 1000
+            infer_ms = perf_state['infer'] / count * 1000
+            display_ms = perf_state['display'] / count * 1000
+            fps = count / elapsed if elapsed > 0 else 0
+            infer_backend = model.backend if model is not None else "none"
+            print(
+                f"[性能] capture={capture_ms:.2f}ms | infer={infer_ms:.2f}ms | "
+                f"display={display_ms:.2f}ms | fps≈{fps:.1f} | "
+                f"capture_backend={capture_backend.backend} | infer_backend={infer_backend}"
+            )
+            perf_state.update(
+                {
+                    'last_time': now,
+                    'count': 0,
+                    'capture': 0.0,
+                    'infer': 0.0,
+                    'display': 0.0,
+                }
+            )
+
+    while True:
+        loop_start = time.time()  # 循环开始计时
 
         frame_interval = 1.0 / max(target_fps_var.get(), 1)
+        display_interval = frame_interval
 
         current_scale = scale.get()
         current_capture_x = capture_x_var.get()
@@ -682,11 +870,25 @@ def main():
         current_time = time.time()
         img = None
 
+        if not capture_ready:
+            root.update_idletasks()
+            root.update()
+            time.sleep(0.05)
+            continue
+
         if win32api.GetAsyncKeyState(VK_RBUTTON) < 0:
             if current_time - last_hotkey_time >= hotkey_cooldown:
                 last_hotkey_time = current_time
-                img = capture_screen(sct, capture_area)
-                closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
+                t_capture_start = time.perf_counter()
+                img = capture_screen(capture_backend, capture_area)
+                capture_cost = time.perf_counter() - t_capture_start
+                record_capture_fps(current_time)
+                t_infer_start = time.perf_counter()
+                closest_enemy_head, closest_enemy = detect_enemy(
+                    model, img, current_capture_x, current_capture_y, threshold.get()
+                )
+                infer_cost = time.perf_counter() - t_infer_start
+                record_perf(duration_capture=capture_cost, duration_infer=infer_cost)
                 if closest_enemy_head and len(closest_enemy_head) > 2:
                     perform_action(driver, *closest_enemy_head[:2], sleep_time_var.get(), size.get(), closest_enemy_head[2])
                     continue
@@ -711,10 +913,21 @@ def main():
 
         if display_var.get():
             if current_time - last_display_time >= display_interval:
+                capture_cost = 0.0
                 if img is None:
-                    img = capture_screen(sct, capture_area)
-                closest_enemy_head, closest_enemy = detect_enemy(model, img, current_capture_x, current_capture_y, threshold.get())
+                    t_capture_start = time.perf_counter()
+                    img = capture_screen(capture_backend, capture_area)
+                    capture_cost = time.perf_counter() - t_capture_start
+                    record_capture_fps(current_time)
+                t_infer_start = time.perf_counter()
+                closest_enemy_head, closest_enemy = detect_enemy(
+                    model, img, current_capture_x, current_capture_y, threshold.get()
+                )
+                infer_cost = time.perf_counter() - t_infer_start
+                t_display_start = time.perf_counter()
                 display_image_with_detections(img, closest_enemy_head, closest_enemy, scale.get(), tk_window)
+                display_cost = time.perf_counter() - t_display_start
+                record_perf(duration_capture=capture_cost, duration_infer=infer_cost, duration_display=display_cost)
                 last_display_time = current_time
 
         if (win32api.GetAsyncKeyState(win32con.VK_SHIFT) < 0 and
